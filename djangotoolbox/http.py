@@ -1,7 +1,12 @@
 from django.conf import settings
-from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponse
-from django.utils import simplejson
+try:
+    import json
+except:
+    from django.utils import simplejson as json
+
+from django.core.serializers.json import DjangoJSONEncoder
+
 from django.utils.encoding import force_unicode
 from django.utils.functional import Promise
 
@@ -14,7 +19,7 @@ class LazyEncoder(DjangoJSONEncoder):
 class JSONResponse(HttpResponse):
     def __init__(self, pyobj, **kwargs):
         super(JSONResponse, self).__init__(
-            simplejson.dumps(pyobj, cls=LazyEncoder),
+            json.dumps(pyobj, cls=LazyEncoder),
             content_type='application/json; charset=%s' %
                             settings.DEFAULT_CHARSET,
             **kwargs)

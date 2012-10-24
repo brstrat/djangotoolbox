@@ -7,6 +7,7 @@ from django.utils.importlib import import_module
 __all__ = ('RawField', 'ListField', 'DictField', 'SetField',
            'BlobField', 'EmbeddedModelField')
 
+EMPTY_ITER = ()
 class _HandleAssignment(object):
     """
     A placeholder class that provides a way to set the attribute on the model.
@@ -38,20 +39,38 @@ class AbstractIterableField(models.Field):
     appropriate data type.
     """
     def __init__(self, item_field=None, *args, **kwargs):
-        if item_field is None:
-            item_field = RawField()
-        self.item_field = item_field
-        default = kwargs.get('default', None if kwargs.get('null') else ())
+        default = kwargs.get('default', None if kwargs.get('null') else EMPTY_ITER)
         if default is not None and not callable(default):
             # ensure a new object is created every time the default is accessed
             kwargs['default'] = lambda: self._type(default)
         super(AbstractIterableField, self).__init__(*args, **kwargs)
+
+        if item_field is None:
+            item_field = RawField()
+        elif callable(item_field):
+            item_field = item_field()
+        self.item_field = item_field
 
     def contribute_to_class(self, cls, name):
         self.item_field.model = cls
         self.item_field.name = name
         super(AbstractIterableField, self).contribute_to_class(cls, name)
 
+        ###
+        #DJANGO_SIMPLE To support circular model dependencies in FK list fields
+        from django.db.models.fields import related
+        if isinstance(self.item_field, related.ForeignKey):
+            other = self.item_field.rel.to
+            if isinstance(other, basestring) or other._meta.pk is None:
+                def resolve_related_class(field, model, cls):
+                    field.rel.to = model
+                    field.do_related_class(model, cls)
+                related.add_lazy_relation(cls, self.item_field, other, resolve_related_class)
+            else:
+                self.item_field.do_related_class(other, cls)
+        #
+        ###
+        
         metaclass = getattr(self.item_field, '__metaclass__', None)
         if issubclass(metaclass, models.SubfieldBase):
             setattr(cls, self.name, _HandleAssignment(self))
@@ -73,6 +92,10 @@ class AbstractIterableField(models.Field):
         return self._convert(self.item_field.to_python, value)
 
     def pre_save(self, model_instance, add):
+        # DJANGO_SIMPLE
+        # Threading issues
+        return self._convert(lambda x: x, getattr(model_instance, self.attname))
+        """
         class fake_instance(object):
             pass
         fake_instance = fake_instance()
@@ -86,7 +109,8 @@ class AbstractIterableField(models.Field):
                 del self.item_field.attname
 
         return self._convert(wrapper, getattr(model_instance, self.attname))
-
+        """
+        
     def get_db_prep_value(self, value, connection, prepared=False):
         return self._convert(self.item_field.get_db_prep_value, value,
                              connection=connection, prepared=prepared)
@@ -111,7 +135,9 @@ class AbstractIterableField(models.Field):
             raise ValidationError('Value of type %r is not iterable' % type(values))
 
     def formfield(self, **kwargs):
-        raise NotImplementedError('No form field implemented for %r' % type(self))
+        #DJANGO_SIMPLE
+        pass
+        #raise NotImplementedError('No form field implemented for %r' % type(self))
 
 class ListField(AbstractIterableField):
     """
@@ -130,12 +156,20 @@ class ListField(AbstractIterableField):
         if self.ordering is not None and not callable(self.ordering):
             raise TypeError("'ordering' has to be a callable or None, "
                             "not of type %r" %  type(self.ordering))
+        # DJANGO_SIMPLE
+        # Always set listfields to [] instead of None
+        kwargs['default'] = kwargs.get('default', [])
+        
         super(ListField, self).__init__(*args, **kwargs)
 
     def pre_save(self, model_instance, add):
         values = getattr(model_instance, self.attname)
         if values is None:
-            return None
+            # DJANGO_SIMPLE
+            # Always set listfields to [] instead of None in db
+            return []
+        
+            #return None
         if values and self.ordering:
             values.sort(key=self.ordering)
         return super(ListField, self).pre_save(model_instance, add)
@@ -241,18 +275,19 @@ class EmbeddedModelField(models.Field):
 
     model = property(lambda self:self._model, _set_model)
 
-    def pre_save(self, model_instance, add):
-        embedded_instance = super(EmbeddedModelField, self).pre_save(model_instance, add)
+    def pre_save(self, model_instance, _):
+        embedded_instance = getattr(model_instance, self.attname)
         if embedded_instance is None:
             return None, None
 
         model = self.embedded_model or models.Model
         if not isinstance(embedded_instance, model):
-            raise TypeError("Expected instance of type %r, not %r" % (
-                            type(model), type(embedded_instance)))
+            raise TypeError("Expected instance of type %r, not %r"
+                            % (model, type(embedded_instance)))
 
         values = []
         for field in embedded_instance._meta.fields:
+            add = not embedded_instance._entity_exists
             value = field.pre_save(embedded_instance, add)
             if field.primary_key and value is None:
                 # exclude unset pks ({"id" : None})
@@ -269,6 +304,8 @@ class EmbeddedModelField(models.Field):
         if self.embedded_model is None:
             values.update({'_module' : embedded_instance.__class__.__module__,
                            '_model'  : embedded_instance.__class__.__name__})
+        # This instance will exist in the db very soon.
+        embedded_instance._entity_exists = True
         return values
 
     # TODO/XXX: Remove this once we have a cleaner solution
@@ -280,12 +317,19 @@ class EmbeddedModelField(models.Field):
     def to_python(self, values):
         if not isinstance(values, dict):
             return values
+
         module, model = values.pop('_module', None), values.pop('_model', None)
-
-        # TODO/XXX: Workaround for old Python releases. Remove this someday.
-        # Let's make sure keys are instances of str
-        values = dict([(str(k), v) for k,v in values.items()])
-
         if module is not None:
-            return getattr(import_module(module), model)(**values)
-        return self.embedded_model(**values)
+            model = getattr(import_module(module), model)
+        else:
+            model = self.embedded_model
+
+        data = {}
+        for field in model._meta.fields:
+            try:
+                # TODO/XXX: str(...) is a workaround for old Python releases.
+                # Remove this someday.
+                data[str(field.attname)] = values[field.column]
+            except KeyError:
+                pass
+        return model(__entity_exists=True, **data)
