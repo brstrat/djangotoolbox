@@ -2,6 +2,7 @@
 
 from django.core.exceptions import ValidationError
 from django.utils.importlib import import_module
+from django.utils.functional import curry
 from django.db import models
 from django.db.models.fields.subclassing import Creator
 from django.db.utils import IntegrityError
@@ -91,6 +92,10 @@ class AbstractIterableField(models.Field):
                 related.add_lazy_relation(cls, self.item_field, other, resolve_related_class)
             else:
                 self.item_field.do_related_class(other, cls)
+
+        if getattr(self.item_field, 'choices', None):
+            if not getattr(cls, 'get_%s_display' % self.name, None):
+                setattr(cls, 'get_%s_display' % self.name, curry(cls._get_ITERABLE_FIELD_display, field=self))
 
         # If items' field uses SubfieldBase we also need to.
         item_metaclass = getattr(self.item_field, '__metaclass__', None)
