@@ -537,10 +537,10 @@ class NonrelCompiler(SQLCompiler):
         if query_model._meta.proxy:
             query_model = query_model._meta.proxy_for_model
 
-        for field in fields:
-            if field.model._meta != query_model._meta:
-                raise DatabaseError("Multi-table inheritance is not "
-                                    "supported by non-relational DBs.")
+        #for field in fields:
+        #    if field.model._meta != query_model._meta:
+        #        raise DatabaseError("Multi-table inheritance is not "
+        #                            "supported by non-relational DBs.")
         return fields
 
     def _get_ordering(self):
