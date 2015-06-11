@@ -463,3 +463,59 @@ class BlobField(models.Field):
 
     def value_to_string(self, obj):
         return str(self._get_val_from_obj(obj))
+
+
+# Stores a dictionary using json, into a TextField
+import json
+from collections import OrderedDict
+
+class JSONDictField(models.Field):
+    # Django seems to do some funky stuff prohibiting this class from inheriting from
+    # PickledObjectField which I can't be bothered to explore. This is quicker, but not DRY :-(
+    __metaclass__ = models.SubfieldBase
+
+    def __init__(self, ordered=False, *args, **kwargs):
+         # Always set dictfields to {} instead of None
+        self.object_pairs_hook = dict
+        if ordered:
+            self.object_pairs_hook = OrderedDict
+
+        kwargs['default'] = kwargs.get('default', self.object_pairs_hook())
+
+        super(JSONDictField, self).__init__(*args, **kwargs)
+
+    def pre_save(self, model_instance, add):
+        values = getattr(model_instance, self.attname)
+        if values is None:
+            return self.object_pairs_hook()
+
+        return super(JSONDictField, self).pre_save(model_instance, add)
+
+    def to_python(self, value):
+        if isinstance(value, dict):
+            return value
+        else:
+            if not value:
+                return value
+            return json.loads(str(value), object_pairs_hook=self.object_pairs_hook)
+
+    def get_db_prep_save(self, value):
+        if value is not None and not isinstance(value, basestring):
+            if isinstance(value, dict):
+                value = json.dumps(value)
+            else:
+                raise TypeError('This field can only store dictionaries.')
+        return value
+
+    def get_internal_type(self):
+        return 'TextField'
+
+    def get_db_prep_lookup(self, lookup_type, value):
+        if lookup_type == 'exact':
+            value = self.get_db_prep_save(value)
+            return super(JSONDictField, self).get_db_prep_lookup(lookup_type, value)
+        elif lookup_type == 'in':
+            value = [self.get_db_prep_save(v) for v in value]
+            return super(JSONDictField, self).get_db_prep_lookup(lookup_type, value)
+        else:
+            raise TypeError('Lookup type %s is not supported.' % lookup_type)
