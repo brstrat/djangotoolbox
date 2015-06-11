@@ -35,13 +35,20 @@ if django.VERSION >= (1, 6):
             return [info.field for info in (query.select +
                         query.related_select_cols)]
         else:
-            return query.model._meta.fields
+            if getattr(query.model._meta, 'poly', False):
+                fields = query.model._meta.poly_fields
+            else:
+                fields = query.model._meta.fields
+
 else:
     def get_selected_fields(query):
         if query.select_fields:
             return (query.select_fields + query.related_select_fields)
         else:
-            return query.model._meta.fields
+            if getattr(query.model._meta, 'poly', False):
+                fields = query.model._meta.poly_fields
+            else:
+                fields = query.model._meta.fields
 
 EMULATED_OPS = {
     'exact': lambda x, y: y in x if isinstance(x, (list, tuple)) else x == y,
@@ -456,8 +463,8 @@ class NonrelCompiler(SQLCompiler):
                 value = self.query.convert_values(value, field,
                                                   self.connection)
             if value is None and not field.null:
-                raise IntegrityError("Non-nullable field %s can't be None!" %
-                                     field.name)
+                if not getattr(self.query.model._meta, 'poly', False) or field in self.query.model._meta.fields:
+                    raise IntegrityError("Non-nullable field %s can't be None!" % field.name)
             result.append(value)
         return result
 
@@ -537,10 +544,12 @@ class NonrelCompiler(SQLCompiler):
         if query_model._meta.proxy:
             query_model = query_model._meta.proxy_for_model
 
-        #for field in fields:
-        #    if field.model._meta != query_model._meta:
-        #        raise DatabaseError("Multi-table inheritance is not "
-        #                            "supported by non-relational DBs.")
+        if not getattr(self.query.model._meta, 'poly', False):
+            for field in fields:
+                if field.model._meta != query_model._meta:
+                    raise DatabaseError('Multi-table inheritance is not supported '
+                                        'by non-relational DBs.')
+
         return fields
 
     def _get_ordering(self):

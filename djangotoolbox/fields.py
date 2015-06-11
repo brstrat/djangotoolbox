@@ -80,6 +80,18 @@ class AbstractIterableField(models.Field):
         self.item_field.name = name
         super(AbstractIterableField, self).contribute_to_class(cls, name)
 
+        # To support circular model dependencies in FK list fields
+        from django.db.models.fields import related
+        if isinstance(self.item_field, related.ForeignKey):
+            other = self.item_field.rel.to
+            if isinstance(other, basestring) or other._meta.pk is None:
+                def resolve_related_class(field, model, cls):
+                    field.rel.to = model
+                    field.do_related_class(model, cls)
+                related.add_lazy_relation(cls, self.item_field, other, resolve_related_class)
+            else:
+                self.item_field.do_related_class(other, cls)
+
         # If items' field uses SubfieldBase we also need to.
         item_metaclass = getattr(self.item_field, '__metaclass__', None)
         if item_metaclass and issubclass(item_metaclass, models.SubfieldBase):
@@ -159,8 +171,7 @@ class AbstractIterableField(models.Field):
                                   type(values))
 
     def formfield(self, **kwargs):
-        raise NotImplementedError("No form field implemented for %r." %
-                                  type(self))
+        pass
 
 
 class ListField(AbstractIterableField):
@@ -179,6 +190,10 @@ class ListField(AbstractIterableField):
         if self.ordering is not None and not callable(self.ordering):
             raise TypeError("'ordering' has to be a callable or None, "
                             "not of type %r." % type(self.ordering))
+
+        # Always set listfields to [] instead of None
+        kwargs['default'] = kwargs.get('default', [])
+
         super(ListField, self).__init__(*args, **kwargs)
 
     def get_internal_type(self):
@@ -187,10 +202,17 @@ class ListField(AbstractIterableField):
     def pre_save(self, model_instance, add):
         value = getattr(model_instance, self.attname)
         if value is None:
-            return None
+            # Always set listfields to [] instead of None in db
+            return []
         if value and self.ordering:
             value.sort(key=self.ordering)
         return super(ListField, self).pre_save(model_instance, add)
+
+    def formfield(self, **kwargs):
+        from django.forms import CharField
+        defaults = {'form_class': CharField}
+        defaults.update(kwargs)
+        return super(AbstractIterableField, self).formfield(**defaults)
 
 
 class SetField(AbstractIterableField):
